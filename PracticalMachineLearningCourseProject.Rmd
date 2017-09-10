@@ -1,0 +1,160 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Donson Yeh"
+date: "2017.9.9"
+output:
+pdf_document: default
+html_document: default
+---
+
+
+##Background and Introduction
+
+In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har.
+
+The goal of the project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. We may use any of the other variables to predict with. We should create a report describing how you built the model, how we used cross validation, what we think the expected out of sample error is, and why we made the choices. We will also use the prediction model to predict 20 different test cases.
+
+##Data Processing
+#Import the data
+We will load the necessarry packages for analyzing.
+```{r}
+# load the packages we need
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(randomForest)
+library(repmis)
+library(gbm)
+library(survival)
+library(splines)
+library(parallel)
+library(plyr)
+```
+
+Then we download the data from the URLs, asign it as the training / testing dataset which we will use latter and load them into R. Define the NA whenever the field is "NA", "#DIV/0!" or "" at first. Then it will be easier to handle later without any misunderstanding.
+```{r}
+# download the dataset from URLs and assign it as the dataset that we need
+trainurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+pmltraining <- source_data(trainurl, na.strings = c("NA", "#DIV/0!", ""), header = TRUE)
+pmltesting <- source_data(testurl, na.strings = c("NA", "#DIV/0!", ""), header = TRUE)
+# load dataset into R
+pmltraining <- read.csv("pml-training.csv", na.strings = c("NA", ""))
+pmltesting <- read.csv("pml-testing.csv", na.strings = c("NA", ""))
+```
+
+Before we do the exploratory data analysis, let's take a look at what we have.
+```{r}
+str(pmltraining)
+str(pmltesting)
+```
+
+You can see that there're 19622 observations and 160 variables in the pmltraining dataset, and 20 observations and 160 variables in the pmltesting dataset. Since you know it's not a good idea to analyze the variable which is 0, NA, missing, or some varialbes like sequent number(variable X), ID(variable user_name), etc. We need to clean the dataset before we build up the algorithms.
+
+#Data cleaning
+We will remove some pmltraining dataset variables which contains the missing value. Not only the pmltraining dataset, we also need to do the same process for the pmltesting dataset to maintain and consist the same variables. Then we can predict the pmltesting dataset by using the same variables.
+```{r}
+pmltraining <- pmltraining[, colSums(is.na(pmltraining)) == 0]
+pmltesting <- pmltesting[, colSums(is.na(pmltesting)) == 0]
+```
+
+We should remove some variables as we mentioned X, user_name, and which is obviously not a good variable for the model building. So we will take off the column 1 ~ 7, and reserve the variables from roll_belt to the rest column. After that, we will see the results again after it's shrinking.
+```{r}
+pmltrainData <- pmltraining[, -c(1:7)]
+pmltestData <- pmltesting[, -c(1:7)]
+str(pmltrainData)
+str(pmltestData)
+```
+
+We cut the unnecessary variables successfully and it looks better now. So we have the cleaned pmltrainData (19622 observations and 53 variables) and pmltestData (20 observations and 53 variables). And we will explore some data features and try to figure out what it may bring to us.
+
+#Data Exploratory
+As you can see that there is a variable called "classe" in the pmltrainData, and it gives us a clue to compare it with the differecnt varialbes and see what it looks like.
+```{r}
+qplot(gyros_belt_x, gyros_belt_y, data = pmltrainData, facets = . ~ classe, geom = c("point", "smooth"), method = "lm", color = classe)
+qplot(accel_belt_x, accel_belt_y, data = pmltrainData, facets = . ~ classe, geom = c("point", "smooth"), method = "lm", color = classe)
+qplot(magnet_belt_x, magnet_belt_y, data = pmltrainData, geom = c("point", "smooth"), method = "lm", color = classe)
+qplot(magnet_belt_x, magnet_belt_y, data = pmltrainData, facets = . ~ classe, geom = c("point", "smooth"), method = "lm", color = classe)
+```
+
+As you can see the last figure above, the classe A looks similiar with the classe B & C (you may not distiguish them precisely from the factors of x axis and y axis), and apparently, the classe D & E is very different with the classe A, B & C (you can see that the slope is quite different between postive and negative).
+
+So what algorithm should we use for the model fit? It may not be a good idea to use the linear model (it's almost the same slope of the classe A, B & C of the last figure), we should try something else.
+
+#Data partition
+Because we only have one pmltrainData to fit our algorithm, thus we need to do the data partitioh into 2 sub-dataset to train and validate our model separately. So we are going to split the pmltrainData into a pmltrain dataset (60%) and a pmltest dataset (40%).
+```{r}
+set.seed(1234) 
+inTrain <- createDataPartition(pmltrainData$classe, p = 0.6, list = FALSE)
+pmltrain <- pmltrainData[inTrain, ]
+pmltest <- pmltrainData[-inTrain, ]
+```
+
+##Modeling Algorithms
+Just as our finding of the Data Exploratory, we may not use the linear regression model for the pmltrainData, we will try some others and see if the accuracy rate is good enought for us to make a final model decision.
+
+Let's do the model fit which is learning from the course, so we will fit 3 different models as bellow to figure out who will be our final model champion.
+
+1. Trees
+2. Random Forests
+3. Boosting with Trees
+
+#Cross Validation
+We will use k-fold cross validation to implement in the algorithm to average the errors that we may get. Across all of those tryings, we would get an estimate of the average error rate.
+
+When we think if it's a Larger k, then we will get a less bias and more variance model, however a smaller k, then we will get a more bias and less variance model. So we decide to use 5-fold to run for all the algorithm that we will try.
+```{r}
+cl <- trainControl(method = "cv", number = 5)
+```
+
+#1. Trees
+So let's fit the Trees and see what happen to our accuracy rate.
+```{r}
+modFit1 <- train(classe ~ ., method = "rpart", data = pmltrain, trControl = cl)
+pd1 <- predict(modFit1, pmltest)
+con1 <- confusionMatrix(pmltest$classe, pd1)
+accuracy_trees <- con1$overall[1]
+print(con1)
+print(accuracy_trees)
+```
+
+From the confusion matrix above, the Trees's accuracy rate is 0.4904, so the out-of-sample error rate is 0.5096. It seems that the Trees even can't catch up with a coin flip prediction, it doesn't predict very well.
+
+#2. Random Forests
+Since Trees doesn't predict very well, let's try the Random Forest algorithm as the model.
+```{r}
+modFit2 <- train(classe ~ ., method = "rf", data = pmltrain,  trControl = cl)
+pd2 <- predict(modFit2, pmltest)
+con2 <- confusionMatrix(pmltest$classe, pd2)
+accuracy_rf <- con2$overall[1]
+print(con2)
+print(accuracy_rf)
+```
+
+Amazing. The Random Forest performs better than the Trees. The accuracy rate is up to 0.9925, and so the out-of-sample error rate is 0.0075. Let's go to the final model fit.
+
+#3. Boosting With Trees
+So this is the last model that we will try. Let's see if it can break the record of the Random Forest model or not.
+```{r}
+modFit3 <- train(classe ~ ., method = "gbm", data = pmltrain,  trControl = cl)
+pd3 <- predict(modFit3, pmltest)
+con3 <- confusionMatrix(pmltest$classe, pd3)
+accuracy_bwt <- con3$overall[1]
+print(con3)
+print(accuracy_bwt)
+```
+
+Wow, the accuracy rate of the Boosting with Trees is 0.9606 and the out of sample rate will be 0.0334. Although it didn't beat the Random Forests, but it is a tough guy who will earn your respect.
+
+##Conclusion
+So you can see that we did try for 3 models to find out which one is the best prediction of the outcome. And the evidence said that the prize goes to the Random Forests algorithm.
+
+#Prediction on Testing Set
+Therefore we choose the Random Forests algorthm as our prediction of the outcome classe of the pmltestData. Because the accuracy rate is the highest one, it reaches 0.9925 and the out of sample rate is 0.0075.
+
+```{r}
+predict(modFit2, pmltestData)
+```
+
+We can predict some other new data into a classe by the Radom Forests algorithm.
